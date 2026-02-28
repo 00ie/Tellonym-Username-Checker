@@ -1,0 +1,64 @@
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+      - "2112:2112"
+    volumes:
+      - ./found_usernames.txt:/app/found_usernames.txt
+      - ./logs:/app/logs
+      - ./proxies.txt:/app/proxies.txt
+    environment:
+      - TELLONYM_ENVIRONMENT=production
+      - TELLONYM_STORAGE_TYPE=postgres
+      - TELLONYM_DB_HOST=postgres
+      - TELLONYM_DB_USER=postgres
+      - TELLONYM_DB_PASSWORD=postgres
+      - TELLONYM_DB_NAME=tellonym
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=tellonym
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

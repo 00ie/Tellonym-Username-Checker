@@ -1,0 +1,76 @@
+app:
+  name: "Tellonym Username Checker"
+  version: "1.0.0"
+  environment: "production"
+checker:
+  request_timeout: 10s
+  max_retries: 3
+  retry_backoff: 1s
+  jitter_max: 500ms
+  batch_size: 100
+  queue_size: 10000
+  follow_redirects: false
+  max_concurrent: 50
+  username_rules:
+    min_length: 3
+    max_length: 30
+    allow_letters: true
+    allow_numbers: true
+    allow_underscore: true
+    allow_dot: true
+    disallow_leading_dot: true
+    disallow_trailing_dot: true
+    max_consecutive_dots: 1
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+proxy:
+  enabled: true
+  types:
+    - "*"
+  max_consecutive_fails: 3
+  health_check_interval: 5m
+  rotation_strategy: "round-robin"
+  validation_url: "https://httpbin.org/ip"
+  validation_timeout: 10s
+  max_lifetime: 1h
+storage:
+  type: "file"
+  file_path: "found_usernames.txt"
+  buffer_size: 100
+  flush_interval: 5s
+  postgresql:
+    host: "localhost"
+    port: 5432
+    user: "postgres"
+    password: "password"
+    dbname: "tellonym"
+    sslmode: "disable"
+api:
+  enabled: false
+  host: "localhost"
+  port: 8080
+  auth:
+    enabled: true
+    api_keys:
+      - "your-api-key-here"
+metrics:
+  enabled: true
+  port: 2112
+  path: "/metrics"
+logging:
+  level: "info"
+  output_path: "logs/app.log"
+  encoding: "console"
+rate_limit:
+  enabled: true
+  requests_per_sec: 50
+  burst: 10
+  per_ip: false
+webhook:
+  enabled: false
+  url: ""
+  username: "Gon"
+  avatar_url: "https://i.pinimg.com/736x/dd/f4/75/ddf475e4b9767235362fc1cf3a16ed1c.jpg"
+  timeout: 10s
