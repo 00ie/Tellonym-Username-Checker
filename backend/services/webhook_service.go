@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,17 +16,27 @@ import (
 )
 
 const (
-	fixedWebhookUsername = "Gon"
-	fixedWebhookAvatar   = "https://i.pinimg.com/736x/dd/f4/75/ddf475e4b9767235362fc1cf3a16ed1c.jpg"
-	webhookFooterText    = "github: @00ie | discord.gg/2asv4rEhGh"
+	fixedWebhookUsername    = "Gon"
+	fixedWebhookAvatar      = "https://i.pinimg.com/736x/dd/f4/75/ddf475e4b9767235362fc1cf3a16ed1c.jpg"
+	webhookFooterText       = "github: @00ie | discord.gg/2asv4rEhGh"
+	defaultWebhookTimeoutMs = int64(10000)
 )
 
-type WebhookSettings struct {
+type WebhookConfig struct {
+	Label     string `json:"label"`
 	Enabled   bool   `json:"enabled"`
 	URL       string `json:"url"`
-	Username  string `json:"username"`
-	AvatarURL string `json:"avatarURL"`
 	TimeoutMs int64  `json:"timeoutMs"`
+}
+
+type WebhookSettings struct {
+	Enabled       bool            `json:"enabled"`
+	URL           string          `json:"url"`
+	Username      string          `json:"username"`
+	AvatarURL     string          `json:"avatarURL"`
+	TimeoutMs     int64           `json:"timeoutMs"`
+	ActiveWebhook int             `json:"activeWebhook"`
+	Webhooks      []WebhookConfig `json:"webhooks"`
 }
 
 type webhookJob struct {
@@ -36,7 +47,6 @@ type WebhookService struct {
 	mu       sync.RWMutex
 	logger   *logger.Logger
 	config   WebhookSettings
-	client   *http.Client
 	queue    chan webhookJob
 	quit     chan struct{}
 	wg       sync.WaitGroup
@@ -50,16 +60,31 @@ func NewWebhookService(cfg *config.WebhookConfig, logger *logger.Logger) *Webhoo
 		timeout = 10 * time.Second
 	}
 
+	initialURL, err := normalizeWebhookURL(cfg.URL)
+	if err != nil {
+		initialURL = strings.TrimSpace(cfg.URL)
+	}
+
+	initialSettings := WebhookSettings{
+		Enabled:       cfg.Enabled,
+		URL:           initialURL,
+		Username:      fixedWebhookUsername,
+		AvatarURL:     fixedWebhookAvatar,
+		TimeoutMs:     timeout.Milliseconds(),
+		ActiveWebhook: 0,
+		Webhooks: []WebhookConfig{
+			{
+				Label:     webhookLabel(0),
+				Enabled:   cfg.Enabled,
+				URL:       initialURL,
+				TimeoutMs: timeout.Milliseconds(),
+			},
+		},
+	}
+
 	service := &WebhookService{
 		logger: logger.Named("webhook-service"),
-		config: WebhookSettings{
-			Enabled:   cfg.Enabled,
-			URL:       strings.TrimSpace(cfg.URL),
-			Username:  fixedWebhookUsername,
-			AvatarURL: fixedWebhookAvatar,
-			TimeoutMs: timeout.Milliseconds(),
-		},
-		client: &http.Client{Timeout: timeout},
+		config: normalizeWebhookSettings(initialSettings),
 		queue:  make(chan webhookJob, 512),
 		quit:   make(chan struct{}),
 		sent:   make(map[string]time.Time),
@@ -83,29 +108,40 @@ func (s *WebhookService) GetSettings() WebhookSettings {
 	cfg := s.config
 	s.mu.RUnlock()
 
-	cfg.Username = fixedWebhookUsername
-	cfg.AvatarURL = fixedWebhookAvatar
-	return cfg
+	return normalizeWebhookSettings(cfg)
 }
 
 func (s *WebhookService) UpdateSettings(settings WebhookSettings) error {
-	settings.URL = strings.TrimSpace(settings.URL)
-	settings.Username = fixedWebhookUsername
-	settings.AvatarURL = fixedWebhookAvatar
+	normalized := normalizeWebhookSettings(settings)
 
-	if settings.TimeoutMs <= 0 {
-		settings.TimeoutMs = 10000
+	for index, webhook := range normalized.Webhooks {
+		normalizedURL, err := normalizeWebhookURL(webhook.URL)
+		if err != nil {
+			return fmt.Errorf("webhook %d URL is invalid: %w", index+1, err)
+		}
+		normalized.Webhooks[index].URL = normalizedURL
+		if normalized.Webhooks[index].Enabled && normalizedURL == "" {
+			return fmt.Errorf("webhook %d URL is required when enabled", index+1)
+		}
 	}
-	if settings.Enabled && settings.URL == "" {
-		return fmt.Errorf("webhook URL is required when enabled")
+
+	if normalized.ActiveWebhook < 0 || normalized.ActiveWebhook >= len(normalized.Webhooks) {
+		normalized.ActiveWebhook = 0
 	}
+	selected := normalized.Webhooks[normalized.ActiveWebhook]
+	normalized.Enabled = selected.Enabled
+	normalized.URL = selected.URL
+	normalized.TimeoutMs = selected.TimeoutMs
 
 	s.mu.Lock()
-	s.config = settings
-	s.client = &http.Client{Timeout: time.Duration(settings.TimeoutMs) * time.Millisecond}
+	s.config = normalized
 	s.mu.Unlock()
 
-	s.logger.Info("webhook settings updated", "enabled", settings.Enabled)
+	s.logger.Info(
+		"webhook settings updated",
+		"webhooks", len(normalized.Webhooks),
+		"active_webhook", normalized.ActiveWebhook+1,
+	)
 	return nil
 }
 
@@ -119,7 +155,7 @@ func (s *WebhookService) SendUsernameAvailable(username string) error {
 	cfg := s.config
 	s.mu.RUnlock()
 
-	if !cfg.Enabled || cfg.URL == "" {
+	if !hasEnabledWebhook(cfg.Webhooks) {
 		return nil
 	}
 
@@ -142,15 +178,25 @@ func (s *WebhookService) SendTest(username string) error {
 	}
 
 	s.mu.RLock()
-	cfg := s.config
-	client := s.client
+	cfg := normalizeWebhookSettings(s.config)
 	s.mu.RUnlock()
 
-	if cfg.URL == "" {
+	if len(cfg.Webhooks) == 0 {
+		return fmt.Errorf("no webhook configured")
+	}
+
+	active := cfg.Webhooks[cfg.ActiveWebhook]
+	if active.URL == "" {
 		return fmt.Errorf("webhook URL is empty")
 	}
 
-	return s.sendWithRetry(client, cfg, username, true)
+	timeout := normalizeTimeoutMs(active.TimeoutMs)
+	client := &http.Client{Timeout: time.Duration(timeout) * time.Millisecond}
+
+	return s.sendWithRetry(client, WebhookSettings{
+		URL:       active.URL,
+		TimeoutMs: timeout,
+	}, username, true)
 }
 
 func (s *WebhookService) runQueue() {
@@ -175,16 +221,22 @@ func (s *WebhookService) runQueue() {
 			}
 
 			s.mu.RLock()
-			cfg := s.config
-			client := s.client
+			cfg := normalizeWebhookSettings(s.config)
 			s.mu.RUnlock()
 
-			if !cfg.Enabled || cfg.URL == "" {
-				continue
-			}
+			for _, webhook := range cfg.Webhooks {
+				if !webhook.Enabled || webhook.URL == "" {
+					continue
+				}
 
-			if err := s.sendWithRetry(client, cfg, job.username, false); err != nil {
-				s.logger.Warn("failed to send webhook", "error", err)
+				timeout := normalizeTimeoutMs(webhook.TimeoutMs)
+				client := &http.Client{Timeout: time.Duration(timeout) * time.Millisecond}
+				if err := s.sendWithRetry(client, WebhookSettings{
+					URL:       webhook.URL,
+					TimeoutMs: timeout,
+				}, job.username, false); err != nil {
+					s.logger.Warn("failed to send webhook", "webhook", webhook.Label, "error", err)
+				}
 			}
 
 			lastSent = time.Now()
@@ -356,4 +408,92 @@ func buildWebhookPayload(cfg WebhookSettings, username string, test bool) map[st
 			},
 		},
 	}
+}
+
+func normalizeWebhookSettings(settings WebhookSettings) WebhookSettings {
+	settings.Username = fixedWebhookUsername
+	settings.AvatarURL = fixedWebhookAvatar
+	settings.URL = strings.TrimSpace(settings.URL)
+	settings.TimeoutMs = normalizeTimeoutMs(settings.TimeoutMs)
+
+	if len(settings.Webhooks) == 0 {
+		settings.Webhooks = []WebhookConfig{
+			{
+				Label:     webhookLabel(0),
+				Enabled:   settings.Enabled,
+				URL:       settings.URL,
+				TimeoutMs: settings.TimeoutMs,
+			},
+		}
+	} else {
+		normalized := make([]WebhookConfig, 0, len(settings.Webhooks))
+		for index, webhook := range settings.Webhooks {
+			timeout := normalizeTimeoutMs(webhook.TimeoutMs)
+			if index == settings.ActiveWebhook && settings.TimeoutMs > 0 {
+				timeout = normalizeTimeoutMs(settings.TimeoutMs)
+			}
+			normalized = append(normalized, WebhookConfig{
+				Label:     webhookLabel(index),
+				Enabled:   webhook.Enabled,
+				URL:       strings.TrimSpace(webhook.URL),
+				TimeoutMs: timeout,
+			})
+		}
+		settings.Webhooks = normalized
+	}
+
+	if settings.ActiveWebhook < 0 || settings.ActiveWebhook >= len(settings.Webhooks) {
+		settings.ActiveWebhook = 0
+	}
+
+	active := settings.Webhooks[settings.ActiveWebhook]
+	settings.Enabled = active.Enabled
+	settings.URL = active.URL
+	settings.TimeoutMs = normalizeTimeoutMs(active.TimeoutMs)
+
+	return settings
+}
+
+func normalizeWebhookURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	if !strings.Contains(trimmed, "://") {
+		trimmed = "https://" + trimmed
+	}
+
+	parsed, err := url.ParseRequestURI(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("malformed URL")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("unsupported URL scheme")
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+
+	return parsed.String(), nil
+}
+
+func normalizeTimeoutMs(timeoutMs int64) int64 {
+	if timeoutMs <= 0 {
+		return defaultWebhookTimeoutMs
+	}
+	return timeoutMs
+}
+
+func hasEnabledWebhook(webhooks []WebhookConfig) bool {
+	for _, webhook := range webhooks {
+		if webhook.Enabled && webhook.URL != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func webhookLabel(index int) string {
+	return fmt.Sprintf("Webhook %d", index+1)
 }

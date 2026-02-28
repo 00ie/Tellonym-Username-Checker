@@ -10,20 +10,36 @@ import { Navbar } from './components/Navbar'
 import { About } from './components/About'
 import { Footer } from './components/Footer'
 import { RateLimitWarning } from './components/RateLimitWarning'
+import { Ping } from './services/backend'
 import { useStore } from './store'
 import { useTheme } from './theme'
 import { accentPalette } from './theme/palette'
 
 const queryClient = new QueryClient()
+const activeTabStorageKey = 'tellonym.activeTab'
+const tabIds = ['dashboard', 'checker', 'proxies', 'statistics', 'settings', 'about'] as const
+type TabId = (typeof tabIds)[number]
+
+function normalizeTab(value: string | null): TabId {
+  if (value && tabIds.includes(value as TabId)) {
+    return value as TabId
+  }
+  return 'dashboard'
+}
 
 function App() {
-  const [activeTab, setActiveTab] = useState('dashboard')
+  const [activeTab, setActiveTab] = useState<TabId>(() => normalizeTab(localStorage.getItem(activeTabStorageKey)))
   const [showRateLimitWarning, setShowRateLimitWarning] = useState(false)
+  const [backendConnected, setBackendConnected] = useState(false)
   const { connectWebSocket, disconnectWebSocket, loadProxies, stats, proxyStats } = useStore()
   const { theme } = useTheme()
   const lastAlertAt = useRef(0)
   const lastRateLimitedSeen = useRef(0)
   const palette = accentPalette[theme]
+
+  useEffect(() => {
+    localStorage.setItem(activeTabStorageKey, activeTab)
+  }, [activeTab])
 
   useEffect(() => {
     connectWebSocket()
@@ -33,6 +49,38 @@ function App() {
       disconnectWebSocket()
     }
   }, [connectWebSocket, disconnectWebSocket, loadProxies])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const checkBackend = async () => {
+      try {
+        const healthy = await Promise.race<boolean>([
+          Ping(),
+          new Promise<boolean>((resolve) => {
+            window.setTimeout(() => resolve(false), 1800)
+          }),
+        ])
+        if (!cancelled) {
+          setBackendConnected(Boolean(healthy))
+        }
+      } catch {
+        if (!cancelled) {
+          setBackendConnected(false)
+        }
+      }
+    }
+
+    void checkBackend()
+    const id = window.setInterval(() => {
+      void checkBackend()
+    }, 5000)
+
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [])
 
   useEffect(() => {
     if (!stats.isRunning) {
@@ -67,15 +115,31 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <div className="neon-background min-h-screen bg-black text-white">
-        <Navbar activeTab={activeTab} onTabChange={setActiveTab} />
+        <Navbar
+          activeTab={activeTab}
+          onTabChange={(tab) => setActiveTab(normalizeTab(tab))}
+          backendConnected={backendConnected}
+        />
 
         <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-          {activeTab === 'dashboard' && <Dashboard />}
-          {activeTab === 'checker' && <CheckerPanel />}
-          {activeTab === 'proxies' && <ProxyManager />}
-          {activeTab === 'statistics' && <Statistics />}
-          {activeTab === 'settings' && <Settings />}
-          {activeTab === 'about' && <About />}
+          <section className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
+            <Dashboard />
+          </section>
+          <section className={activeTab === 'checker' ? 'block' : 'hidden'}>
+            <CheckerPanel />
+          </section>
+          <section className={activeTab === 'proxies' ? 'block' : 'hidden'}>
+            <ProxyManager />
+          </section>
+          <section className={activeTab === 'statistics' ? 'block' : 'hidden'}>
+            <Statistics active={activeTab === 'statistics'} />
+          </section>
+          <section className={activeTab === 'settings' ? 'block' : 'hidden'}>
+            <Settings />
+          </section>
+          <section className={activeTab === 'about' ? 'block' : 'hidden'}>
+            <About />
+          </section>
         </main>
 
         <Footer />

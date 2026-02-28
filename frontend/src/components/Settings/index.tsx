@@ -1,16 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
 import {
+  ExportAppConfiguration,
+  ExportFoundUsernames,
+  GetAppSettings,
   GetCheckerSettings,
   GetConfig,
   GetWebhookSettings,
+  ImportAppConfiguration,
   SendTestWebhook,
+  UpdateAppSettings,
   UpdateCheckerSettings,
   UpdateWebhookSettings,
 } from '../../services/backend'
 import { type Language, useI18n } from '../../i18n'
 import { type AccentTheme, useTheme } from '../../theme'
-import type { CheckerSettings, WebhookSettings } from '../../types/api'
+import type { AppSettings, CheckerSettings, WebhookConfig, WebhookSettings } from '../../types/api'
 
 const fixedWebhookUsername = 'Gon'
 const fixedWebhookAvatar = 'https://i.pinimg.com/736x/dd/f4/75/ddf475e4b9767235362fc1cf3a16ed1c.jpg'
@@ -36,6 +41,19 @@ const defaultWebhookSettings: WebhookSettings = {
   username: fixedWebhookUsername,
   avatarURL: fixedWebhookAvatar,
   timeoutMs: 10000,
+  activeWebhook: 0,
+  webhooks: [
+    {
+      label: 'Webhook 1',
+      enabled: false,
+      url: '',
+      timeoutMs: 10000,
+    },
+  ],
+}
+
+const defaultAppSettings: AppSettings = {
+  openLinksOnClose: true,
 }
 
 type ToggleField =
@@ -50,6 +68,84 @@ type ValidationResult = {
   valid: boolean
   messageKey: string
   messageParams?: Record<string, string | number>
+}
+
+function isUserCancelledError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+  const message = error.message.toLowerCase()
+  return message.includes('cancel')
+}
+
+async function runWithRetry<T>(operation: () => Promise<T>, retries = 2): Promise<T> {
+  let attempt = 0
+  let lastError: unknown
+
+  while (attempt <= retries) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (isUserCancelledError(error)) {
+        break
+      }
+      if (attempt === retries) {
+        break
+      }
+      const waitMs = 350 * (2 ** attempt)
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, waitMs)
+      })
+      attempt += 1
+    }
+  }
+
+  throw lastError
+}
+
+function createWebhookSlot(index: number): WebhookConfig {
+  return {
+    label: `Webhook ${index + 1}`,
+    enabled: false,
+    url: '',
+    timeoutMs: 10000,
+  }
+}
+
+function normalizeWebhookForm(settings: WebhookSettings): WebhookSettings {
+  const rawWebhooks = Array.isArray(settings.webhooks) && settings.webhooks.length > 0
+    ? settings.webhooks
+    : [
+        {
+          label: 'Webhook 1',
+          enabled: settings.enabled,
+          url: settings.url,
+          timeoutMs: settings.timeoutMs,
+        },
+      ]
+
+  const webhooks = rawWebhooks.map((webhook, index) => ({
+    label: `Webhook ${index + 1}`,
+    enabled: webhook.enabled,
+    url: webhook.url,
+    timeoutMs: webhook.timeoutMs > 0 ? webhook.timeoutMs : 10000,
+  }))
+
+  const activeWebhook =
+    settings.activeWebhook >= 0 && settings.activeWebhook < webhooks.length ? settings.activeWebhook : 0
+  const selected = webhooks[activeWebhook]
+
+  return {
+    ...settings,
+    username: fixedWebhookUsername,
+    avatarURL: fixedWebhookAvatar,
+    activeWebhook,
+    webhooks,
+    enabled: selected.enabled,
+    url: selected.url,
+    timeoutMs: selected.timeoutMs,
+  }
 }
 
 function validateUsername(username: string, rules: CheckerSettings): ValidationResult {
@@ -119,36 +215,45 @@ export const Settings: React.FC = () => {
   const { theme, setTheme } = useTheme()
   const [appName, setAppName] = useState('Tellonym Username Checker')
   const [environment, setEnvironment] = useState('production')
+  const [appSettings, setAppSettings] = useState<AppSettings>(defaultAppSettings)
   const [checkerForm, setCheckerForm] = useState<CheckerSettings>(defaultCheckerSettings)
   const [webhookForm, setWebhookForm] = useState<WebhookSettings>(defaultWebhookSettings)
+  const [selectedWebhook, setSelectedWebhook] = useState(0)
   const [sampleUsername, setSampleUsername] = useState('_o1')
   const [testWebhookUsername, setTestWebhookUsername] = useState('available_name')
   const [saving, setSaving] = useState(false)
   const [sendingTest, setSendingTest] = useState(false)
+  const [exportingConfig, setExportingConfig] = useState(false)
+  const [importingConfig, setImportingConfig] = useState(false)
+  const [exportingUsernames, setExportingUsernames] = useState(false)
 
   useEffect(() => {
     const load = async () => {
-      const [cfg, checker, webhook] = await Promise.all([GetConfig(), GetCheckerSettings(), GetWebhookSettings()])
-      setAppName(cfg.name)
-      setEnvironment(cfg.environment)
-      setCheckerForm(checker)
-      setWebhookForm({
-        enabled: webhook.enabled,
-        url: webhook.url,
-        timeoutMs: webhook.timeoutMs,
-        username: fixedWebhookUsername,
-        avatarURL: fixedWebhookAvatar,
-      })
+      try {
+        const [cfg, checker, webhook, settings] = await runWithRetry(() =>
+          Promise.all([GetConfig(), GetCheckerSettings(), GetWebhookSettings(), GetAppSettings()]),
+        )
+        setAppName(cfg.name)
+        setEnvironment(cfg.environment)
+        setAppSettings(settings)
+        setCheckerForm(checker)
+        const normalizedWebhook = normalizeWebhookForm(webhook)
+        setWebhookForm(normalizedWebhook)
+        setSelectedWebhook(normalizedWebhook.activeWebhook)
+      } catch {
+        toast.error(t('settings.toast.loadFailed'))
+      }
     }
 
     void load()
-  }, [])
+  }, [t])
 
   const hasCharset =
     checkerForm.allowLetters || checkerForm.allowNumbers || checkerForm.allowUnderscore || checkerForm.allowDot
   const hasValidLength =
     checkerForm.minLength >= 3 && checkerForm.maxLength <= 30 && checkerForm.minLength <= checkerForm.maxLength
-  const hasValidWebhook = !webhookForm.enabled || webhookForm.url.trim().length > 0
+  const currentWebhook = webhookForm.webhooks[selectedWebhook] ?? createWebhookSlot(selectedWebhook)
+  const hasValidWebhook = webhookForm.webhooks.every((webhook) => !webhook.enabled || webhook.url.trim().length > 0)
   const canSave = hasCharset && hasValidLength && hasValidWebhook
 
   const validation = useMemo(() => validateUsername(sampleUsername, checkerForm), [sampleUsername, checkerForm])
@@ -162,11 +267,14 @@ export const Settings: React.FC = () => {
 
     setSaving(true)
     try {
-      await UpdateCheckerSettings(checkerForm)
-      await UpdateWebhookSettings({
+      const normalizedWebhook = normalizeWebhookForm({
         ...webhookForm,
-        username: fixedWebhookUsername,
-        avatarURL: fixedWebhookAvatar,
+        activeWebhook: selectedWebhook,
+      })
+      await runWithRetry(async () => {
+        await UpdateAppSettings(appSettings)
+        await UpdateCheckerSettings(checkerForm)
+        await UpdateWebhookSettings(normalizedWebhook)
       })
       toast.success(t('settings.toast.saved'))
     } catch {
@@ -177,14 +285,21 @@ export const Settings: React.FC = () => {
   }
 
   const onSendTest = async () => {
-    if (!webhookForm.url.trim()) {
+    if (!currentWebhook.url.trim()) {
       toast.error(t('settings.toast.addUrlFirst'))
       return
     }
 
     setSendingTest(true)
     try {
-      await SendTestWebhook(testWebhookUsername.trim())
+      const normalizedWebhook = normalizeWebhookForm({
+        ...webhookForm,
+        activeWebhook: selectedWebhook,
+      })
+      await runWithRetry(async () => {
+        await UpdateWebhookSettings(normalizedWebhook)
+        await SendTestWebhook(testWebhookUsername.trim())
+      })
       toast.success(t('settings.toast.testSent'))
     } catch {
       toast.error(t('settings.toast.testFailed'))
@@ -195,6 +310,194 @@ export const Settings: React.FC = () => {
 
   const toggleChecker = (key: ToggleField) => {
     setCheckerForm((previous) => ({ ...previous, [key]: !previous[key] }))
+  }
+
+  const onSelectWebhook = (nextIndex: number) => {
+    setSelectedWebhook(nextIndex)
+    setWebhookForm((previous) => {
+      const webhooks = previous.webhooks.length > 0 ? [...previous.webhooks] : [createWebhookSlot(0)]
+      const safeIndex = nextIndex >= 0 && nextIndex < webhooks.length ? nextIndex : 0
+      const selected = webhooks[safeIndex]
+
+      return {
+        ...previous,
+        activeWebhook: safeIndex,
+        enabled: selected.enabled,
+        url: selected.url,
+        timeoutMs: selected.timeoutMs,
+        webhooks,
+      }
+    })
+  }
+
+  const updateSelectedWebhook = (nextValues: Partial<WebhookConfig>) => {
+    setWebhookForm((previous) => {
+      const webhooks = previous.webhooks.length > 0 ? [...previous.webhooks] : [createWebhookSlot(0)]
+      const safeIndex = selectedWebhook >= 0 && selectedWebhook < webhooks.length ? selectedWebhook : 0
+      const existing = webhooks[safeIndex] ?? createWebhookSlot(safeIndex)
+      const nextTimeout =
+        typeof nextValues.timeoutMs === 'number' && Number.isFinite(nextValues.timeoutMs) && nextValues.timeoutMs > 0
+          ? nextValues.timeoutMs
+          : existing.timeoutMs
+      const updated = {
+        ...existing,
+        ...nextValues,
+        timeoutMs: nextTimeout,
+        label: `Webhook ${safeIndex + 1}`,
+      }
+      webhooks[safeIndex] = updated
+
+      return {
+        ...previous,
+        activeWebhook: safeIndex,
+        enabled: updated.enabled,
+        url: updated.url,
+        timeoutMs: updated.timeoutMs,
+        webhooks,
+      }
+    })
+  }
+
+  const addWebhookSlot = () => {
+    const nextIndex = webhookForm.webhooks.length
+    setWebhookForm((previous) => {
+      const webhooks = [...previous.webhooks, createWebhookSlot(nextIndex)]
+      const selected = webhooks[nextIndex]
+      return {
+        ...previous,
+        activeWebhook: nextIndex,
+        enabled: selected.enabled,
+        url: selected.url,
+        timeoutMs: selected.timeoutMs,
+        webhooks,
+      }
+    })
+    setSelectedWebhook(nextIndex)
+  }
+
+  const removeWebhookSlot = () => {
+    if (webhookForm.webhooks.length <= 1) {
+      toast.error(t('settings.toast.keepOneWebhook'))
+      return
+    }
+
+    const confirmed = window.confirm(t('settings.confirmRemoveWebhook', { slot: selectedWebhook + 1 }))
+    if (!confirmed) {
+      return
+    }
+
+    const webhooks = [...webhookForm.webhooks]
+    const safeIndex = selectedWebhook >= 0 && selectedWebhook < webhooks.length ? selectedWebhook : webhooks.length - 1
+    webhooks.splice(safeIndex, 1)
+
+    const relabeled = webhooks.map((webhook, index) => ({
+      ...webhook,
+      label: `Webhook ${index + 1}`,
+    }))
+
+    const nextSelected = safeIndex >= relabeled.length ? relabeled.length - 1 : safeIndex
+    const selected = relabeled[nextSelected]
+
+    setSelectedWebhook(nextSelected)
+    setWebhookForm((previous) => ({
+      ...previous,
+      activeWebhook: nextSelected,
+      enabled: selected.enabled,
+      url: selected.url,
+      timeoutMs: selected.timeoutMs,
+      webhooks: relabeled,
+    }))
+  }
+
+  const moveWebhookSlot = (direction: 'up' | 'down') => {
+    setWebhookForm((previous) => {
+      const webhooks = [...previous.webhooks]
+      if (webhooks.length < 2) {
+        return previous
+      }
+
+      const safeIndex = selectedWebhook >= 0 && selectedWebhook < webhooks.length ? selectedWebhook : 0
+      const targetIndex = direction === 'up' ? safeIndex - 1 : safeIndex + 1
+      if (targetIndex < 0 || targetIndex >= webhooks.length) {
+        return previous
+      }
+
+      const current = webhooks[safeIndex]
+      webhooks[safeIndex] = webhooks[targetIndex]
+      webhooks[targetIndex] = current
+
+      const relabeled = webhooks.map((webhook, index) => ({
+        ...webhook,
+        label: `Webhook ${index + 1}`,
+      }))
+      const selected = relabeled[targetIndex]
+      setSelectedWebhook(targetIndex)
+
+      return {
+        ...previous,
+        activeWebhook: targetIndex,
+        enabled: selected.enabled,
+        url: selected.url,
+        timeoutMs: selected.timeoutMs,
+        webhooks: relabeled,
+      }
+    })
+  }
+
+  const onExportConfig = async () => {
+    setExportingConfig(true)
+    try {
+      const path = await ExportAppConfiguration()
+      toast.success(t('settings.toast.exportConfigSuccess', { path }))
+    } catch (error) {
+      if (isUserCancelledError(error)) {
+        return
+      }
+      toast.error(t('settings.toast.exportConfigFailed'))
+    } finally {
+      setExportingConfig(false)
+    }
+  }
+
+  const onImportConfig = async () => {
+    setImportingConfig(true)
+    try {
+      const path = await ImportAppConfiguration()
+      toast.success(t('settings.toast.importConfigSuccess', { path }))
+
+      const [cfg, checker, webhook, settings] = await runWithRetry(() =>
+        Promise.all([GetConfig(), GetCheckerSettings(), GetWebhookSettings(), GetAppSettings()]),
+      )
+      setAppName(cfg.name)
+      setEnvironment(cfg.environment)
+      setAppSettings(settings)
+      setCheckerForm(checker)
+      const normalizedWebhook = normalizeWebhookForm(webhook)
+      setWebhookForm(normalizedWebhook)
+      setSelectedWebhook(normalizedWebhook.activeWebhook)
+    } catch (error) {
+      if (isUserCancelledError(error)) {
+        return
+      }
+      toast.error(t('settings.toast.importConfigFailed'))
+    } finally {
+      setImportingConfig(false)
+    }
+  }
+
+  const onExportUsernames = async () => {
+    setExportingUsernames(true)
+    try {
+      const path = await ExportFoundUsernames()
+      toast.success(t('settings.toast.exportUsernamesSuccess', { path }))
+    } catch (error) {
+      if (isUserCancelledError(error)) {
+        return
+      }
+      toast.error(t('settings.toast.exportUsernamesFailed'))
+    } finally {
+      setExportingUsernames(false)
+    }
   }
 
   const onLanguageChange = (value: string) => {
@@ -246,6 +549,19 @@ export const Settings: React.FC = () => {
           </select>
           <p className="text-sm text-zinc-400">{t('settings.themeHelp')}</p>
         </div>
+      </div>
+
+      <div className="neon-panel rounded-2xl border border-zinc-800 bg-zinc-950/95 p-4">
+        <h3 className="mb-3 text-lg font-semibold text-red-100">{t('settings.behavior')}</h3>
+        <label className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black/60 px-3 py-2">
+          <span>{t('settings.openLinksOnClose')}</span>
+          <input
+            type="checkbox"
+            checked={appSettings.openLinksOnClose}
+            onChange={(e) => setAppSettings((previous) => ({ ...previous, openLinksOnClose: e.target.checked }))}
+          />
+        </label>
+        <p className="mt-2 text-sm text-zinc-400">{t('settings.openLinksHelp')}</p>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
@@ -408,19 +724,70 @@ export const Settings: React.FC = () => {
         <h3 className="mb-4 text-lg font-semibold text-red-100">{t('settings.webhook')}</h3>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <div className="space-y-4">
+            <div className="rounded-lg border border-zinc-800 bg-black/60 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <label className="space-y-2">
+                  <span className="text-sm text-zinc-300">{t('settings.selectWebhook')}</span>
+                  <select
+                    value={selectedWebhook}
+                    onChange={(e) => onSelectWebhook(Number(e.target.value))}
+                    className="rounded-lg border border-zinc-700 bg-black px-3 py-2 text-zinc-100 outline-none focus:border-red-500"
+                  >
+                    {webhookForm.webhooks.map((webhook, index) => (
+                      <option key={webhook.label} value={index}>
+                        {webhook.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={addWebhookSlot}
+                  className="rounded-lg border border-red-500/60 bg-zinc-900 px-3 py-2 text-sm font-medium text-red-100 transition hover:bg-zinc-800"
+                >
+                  {t('settings.addWebhook')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveWebhookSlot('up')}
+                  disabled={selectedWebhook <= 0}
+                  className="rounded-lg border border-zinc-700 bg-black/60 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-red-500/60 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t('settings.moveWebhookUp')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveWebhookSlot('down')}
+                  disabled={selectedWebhook >= webhookForm.webhooks.length - 1}
+                  className="rounded-lg border border-zinc-700 bg-black/60 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-red-500/60 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t('settings.moveWebhookDown')}
+                </button>
+                <button
+                  type="button"
+                  onClick={removeWebhookSlot}
+                  disabled={webhookForm.webhooks.length <= 1}
+                  className="rounded-lg border border-zinc-700 bg-black/60 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-red-500/60 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {t('settings.removeWebhook')}
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-zinc-400">{t('settings.webhookSlots', { count: webhookForm.webhooks.length })}</p>
+            </div>
+
             <label className="flex items-center justify-between rounded-lg border border-zinc-800 bg-black/60 px-3 py-2">
               <span>{t('settings.enableWebhook')}</span>
               <input
                 type="checkbox"
-                checked={webhookForm.enabled}
-                onChange={(e) => setWebhookForm((previous) => ({ ...previous, enabled: e.target.checked }))}
+                checked={currentWebhook.enabled}
+                onChange={(e) => updateSelectedWebhook({ enabled: e.target.checked })}
               />
             </label>
             <label className="space-y-2">
               <span className="text-sm text-zinc-300">{t('settings.webhookUrl')}</span>
               <input
-                value={webhookForm.url}
-                onChange={(e) => setWebhookForm((previous) => ({ ...previous, url: e.target.value }))}
+                value={currentWebhook.url}
+                onChange={(e) => updateSelectedWebhook({ url: e.target.value })}
                 placeholder="https://discord.com/api/webhooks/..."
                 className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-zinc-100 outline-none focus:border-red-500"
               />
@@ -430,8 +797,8 @@ export const Settings: React.FC = () => {
               <input
                 type="number"
                 min={1000}
-                value={webhookForm.timeoutMs}
-                onChange={(e) => setWebhookForm((previous) => ({ ...previous, timeoutMs: Number(e.target.value) }))}
+                value={currentWebhook.timeoutMs}
+                onChange={(e) => updateSelectedWebhook({ timeoutMs: Number(e.target.value) })}
                 className="w-full rounded-lg border border-zinc-700 bg-black px-3 py-2 text-zinc-100 outline-none focus:border-red-500"
               />
             </label>
@@ -466,6 +833,37 @@ export const Settings: React.FC = () => {
             </button>
             <p className="text-xs text-zinc-400">{t('settings.webhookHelp')}</p>
           </div>
+        </div>
+      </div>
+
+      <div className="neon-panel rounded-2xl border border-zinc-800 bg-zinc-950/95 p-4">
+        <h3 className="mb-3 text-lg font-semibold text-red-100">{t('settings.maintenance')}</h3>
+        <p className="mb-4 text-sm text-zinc-400">{t('settings.maintenanceHelp')}</p>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={onExportConfig}
+            disabled={exportingConfig}
+            className="rounded-lg border border-zinc-700 bg-black/60 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:border-red-500/60 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {exportingConfig ? t('settings.saving') : t('settings.exportConfig')}
+          </button>
+          <button
+            type="button"
+            onClick={onImportConfig}
+            disabled={importingConfig}
+            className="rounded-lg border border-zinc-700 bg-black/60 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:border-red-500/60 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {importingConfig ? t('settings.loading') : t('settings.importConfig')}
+          </button>
+          <button
+            type="button"
+            onClick={onExportUsernames}
+            disabled={exportingUsernames}
+            className="rounded-lg border border-zinc-700 bg-black/60 px-4 py-2 text-sm font-medium text-zinc-100 transition hover:border-red-500/60 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {exportingUsernames ? t('settings.loading') : t('settings.exportUsernames')}
+          </button>
         </div>
       </div>
 

@@ -50,6 +50,8 @@ type StatsService struct {
 	stopOnce     sync.Once
 }
 
+const maxHistoricalRowsResponse = 5000
+
 func NewStatsService(c *checker.Checker, pm *proxy.Manager, logger *logger.Logger, exportDir string) *StatsService {
 	if exportDir == "" {
 		exportDir = "exports"
@@ -149,7 +151,7 @@ func (s *StatsService) GetHistoricalStats(from, to string) ([]HistoricalStats, e
 	s.mu.RUnlock()
 
 	if from == "" && to == "" {
-		return historyCopy, nil
+		return capHistoricalRows(historyCopy), nil
 	}
 
 	fromTime, err := parseOptionalTime(from)
@@ -160,6 +162,9 @@ func (s *StatsService) GetHistoricalStats(from, to string) ([]HistoricalStats, e
 	toTime, err := parseOptionalTime(to)
 	if err != nil {
 		return nil, err
+	}
+	if !fromTime.IsZero() && !toTime.IsZero() && fromTime.After(toTime) {
+		return nil, fmt.Errorf("from must be before to")
 	}
 
 	filtered := make([]HistoricalStats, 0, len(historyCopy))
@@ -177,7 +182,7 @@ func (s *StatsService) GetHistoricalStats(from, to string) ([]HistoricalStats, e
 		filtered = append(filtered, row)
 	}
 
-	return filtered, nil
+	return capHistoricalRows(filtered), nil
 }
 
 func (s *StatsService) Export(format string) (string, error) {
@@ -223,6 +228,13 @@ func (s *StatsService) pushRecentFind(username string) {
 	s.mu.Unlock()
 }
 
+func (s *StatsService) ClearDashboardData() {
+	s.mu.Lock()
+	s.recentFinds = make([]string, 0, 50)
+	s.history = make([]HistoricalStats, 0, 4096)
+	s.mu.Unlock()
+}
+
 func parseOptionalTime(raw string) (time.Time, error) {
 	if raw == "" {
 		return time.Time{}, nil
@@ -239,6 +251,13 @@ func parseOptionalTime(raw string) (time.Time, error) {
 	}
 
 	return parsed, nil
+}
+
+func capHistoricalRows(rows []HistoricalStats) []HistoricalStats {
+	if len(rows) <= maxHistoricalRowsResponse {
+		return rows
+	}
+	return rows[len(rows)-maxHistoricalRowsResponse:]
 }
 
 func exportCSV(path string, rows []HistoricalStats) error {

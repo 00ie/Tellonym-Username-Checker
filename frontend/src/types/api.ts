@@ -66,6 +66,15 @@ export interface WebhookSettings {
   username: string
   avatarURL: string
   timeoutMs: number
+  activeWebhook: number
+  webhooks: WebhookConfig[]
+}
+
+export interface WebhookConfig {
+  label: string
+  enabled: boolean
+  url: string
+  timeoutMs: number
 }
 
 export interface HistoricalStats {
@@ -80,4 +89,8 @@ export interface AppConfig {
   name: string
   version: string
   environment: string
+}
+
+export interface AppSettings {
+  openLinksOnClose: boolean
 }

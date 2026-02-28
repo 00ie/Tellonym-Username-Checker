@@ -396,6 +396,26 @@ func (c *Checker) GetStats() Stats {
 	return s
 }
 
+func (c *Checker) ResetStats() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.isRunning {
+		return fmt.Errorf("checker must be stopped before clearing dashboard data")
+	}
+
+	atomic.StoreUint64(&c.attempts, 0)
+	atomic.StoreUint64(&c.found, 0)
+	atomic.StoreUint64(&c.errors, 0)
+	atomic.StoreUint64(&c.rateLimited, 0)
+	atomic.StoreUint64(&c.responseTotal, 0)
+	atomic.StoreUint64(&c.responseCount, 0)
+
+	c.stats = Stats{}
+
+	return nil
+}
+
 func (c *Checker) IsRunning() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

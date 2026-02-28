@@ -2,8 +2,14 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
@@ -20,6 +26,8 @@ type App struct {
 	config         *config.Config
 	logger         *logger.Logger
 	layout         runtimeLayout
+	settings       AppSettings
+	settingsMu     sync.RWMutex
 	checkerService *services.CheckerService
 	proxyService   *services.ProxyService
 	statsService   *services.StatsService
@@ -27,8 +35,29 @@ type App struct {
 	storage        *storage.Storage
 }
 
+const (
+	serverInviteURL = "https://discord.gg/2asv4rEhGh"
+	githubProfile   = "https://github.com/00ie"
+)
+
+type ConfigExportSnapshot struct {
+	Version         string                   `json:"version"`
+	ExportedAt      string                   `json:"exportedAt"`
+	AppSettings     AppSettings              `json:"appSettings"`
+	CheckerSettings services.CheckerSettings `json:"checkerSettings"`
+	WebhookSettings services.WebhookSettings `json:"webhookSettings"`
+}
+
+type ConfigImportSnapshot struct {
+	AppSettings     *AppSettings              `json:"appSettings"`
+	CheckerSettings *services.CheckerSettings `json:"checkerSettings"`
+	WebhookSettings *services.WebhookSettings `json:"webhookSettings"`
+}
+
 func NewApp() *App {
-	return &App{}
+	return &App{
+		settings: defaultAppSettings(),
+	}
 }
 
 func (a *App) Startup(ctx context.Context) {
@@ -46,6 +75,18 @@ func (a *App) Startup(ctx context.Context) {
 		return
 	}
 	a.layout = layout
+	a.settings = defaultAppSettings()
+
+	settings, err := loadAppSettings(layout.AppSettingsFile)
+	if err != nil {
+		a.logger.Warn("failed to load app settings", "error", err)
+	} else {
+		a.settings = settings
+	}
+
+	if err := saveAppSettings(layout.AppSettingsFile, a.settings); err != nil {
+		a.logger.Warn("failed to persist app settings", "error", err)
+	}
 
 	if os.Getenv("TELLONYM_CONFIG") == "" {
 		if err := os.Setenv("TELLONYM_CONFIG", layout.ConfigFile); err != nil {
@@ -147,7 +188,95 @@ func (a *App) Shutdown(ctx context.Context) {
 		a.logger.Sync()
 	}
 
+	if a.shouldOpenLinksOnClose() {
+		runtime.BrowserOpenURL(ctx, serverInviteURL)
+		runtime.BrowserOpenURL(ctx, githubProfile)
+	}
+
 	runtime.LogInfo(ctx, "application shutdown complete")
+}
+
+func (a *App) DomReady(ctx context.Context) {
+	if a.layout.WindowStateFile == "" {
+		return
+	}
+
+	windowState, err := loadWindowState(a.layout.WindowStateFile)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Warn("failed to load window state", "error", err)
+		}
+		return
+	}
+	if !windowState.IsValid() {
+		return
+	}
+
+	if windowState.Width >= 700 && windowState.Height >= 500 {
+		runtime.WindowSetSize(ctx, windowState.Width, windowState.Height)
+		runtime.WindowSetPosition(ctx, windowState.X, windowState.Y)
+	}
+
+	switch windowState.State {
+	case "maximised":
+		runtime.WindowMaximise(ctx)
+	case "minimised":
+		runtime.WindowMinimise(ctx)
+	case "fullscreen":
+		runtime.WindowFullscreen(ctx)
+	}
+}
+
+func (a *App) BeforeClose(ctx context.Context) bool {
+	a.saveCurrentWindowState(ctx)
+	return false
+}
+
+func (a *App) saveCurrentWindowState(ctx context.Context) {
+	defer func() {
+		if recovered := recover(); recovered != nil && a.logger != nil {
+			a.logger.Warn("recovered while saving window state", "error", recovered)
+		}
+	}()
+
+	if a.layout.WindowStateFile == "" {
+		return
+	}
+
+	existing, _ := loadWindowState(a.layout.WindowStateFile)
+	state := existing
+	state.State = "normal"
+
+	if runtime.WindowIsFullscreen(ctx) {
+		state.State = "fullscreen"
+	} else if runtime.WindowIsMaximised(ctx) {
+		state.State = "maximised"
+	} else if runtime.WindowIsMinimised(ctx) {
+		state.State = "minimised"
+	}
+
+	if runtime.WindowIsNormal(ctx) {
+		width, height := runtime.WindowGetSize(ctx)
+		x, y := runtime.WindowGetPosition(ctx)
+		state.Width = width
+		state.Height = height
+		state.X = x
+		state.Y = y
+	}
+
+	if !state.IsValid() {
+		return
+	}
+
+	if err := saveWindowState(a.layout.WindowStateFile, state); err != nil && a.logger != nil {
+		a.logger.Warn("failed to save window state", "error", err)
+	}
+}
+
+func (a *App) shouldOpenLinksOnClose() bool {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.settings.OpenLinksOnClose
 }
 
 func (a *App) StartChecker(usernameLength int, threads int) error {
@@ -258,6 +387,27 @@ func (a *App) GetConfig() config.AppConfig {
 	return a.config.App
 }
 
+func (a *App) GetAppSettings() AppSettings {
+	a.settingsMu.RLock()
+	defer a.settingsMu.RUnlock()
+	return a.settings
+}
+
+func (a *App) UpdateAppSettings(settings AppSettings) error {
+	a.settingsMu.Lock()
+	a.settings = settings
+	a.settingsMu.Unlock()
+
+	if a.layout.AppSettingsFile == "" {
+		return nil
+	}
+
+	if err := saveAppSettings(a.layout.AppSettingsFile, settings); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (a *App) UpdateCheckerSettings(settings services.CheckerSettings) error {
 	if a.checkerService == nil {
 		return fmt.Errorf("checker service not initialized")
@@ -305,4 +455,174 @@ func (a *App) ClearFoundUsernames() error {
 		return nil
 	}
 	return a.storage.ClearFound()
+}
+
+func (a *App) ClearDashboardData() error {
+	if a.checkerService == nil {
+		return fmt.Errorf("checker service not initialized")
+	}
+
+	if err := a.checkerService.ResetStats(); err != nil {
+		return err
+	}
+
+	if a.statsService != nil {
+		a.statsService.ClearDashboardData()
+	}
+
+	if a.storage != nil {
+		if err := a.storage.ClearFound(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (a *App) Ping() bool {
+	return a.ctx != nil && a.checkerService != nil && a.statsService != nil
+}
+
+func (a *App) ExportFoundUsernames() (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("application context not initialized")
+	}
+	if a.storage == nil {
+		return "", fmt.Errorf("storage not initialized")
+	}
+
+	usernames := a.storage.GetFoundUsernames()
+	if len(usernames) == 0 {
+		return "", fmt.Errorf("no usernames to export")
+	}
+	sort.Strings(usernames)
+
+	defaultName := fmt.Sprintf("found-usernames-%s.txt", time.Now().Format("20060102-150405"))
+	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:            "Export Found Usernames",
+		DefaultFilename:  defaultName,
+		DefaultDirectory: a.layout.ExportsDir,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Text Files (*.txt)", Pattern: "*.txt"},
+			{DisplayName: "CSV Files (*.csv)", Pattern: "*.csv"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(savePath) == "" {
+		return "", fmt.Errorf("export cancelled")
+	}
+
+	var content string
+	if strings.EqualFold(filepath.Ext(savePath), ".csv") {
+		lines := make([]string, 0, len(usernames)+1)
+		lines = append(lines, "username")
+		lines = append(lines, usernames...)
+		content = strings.Join(lines, "\n") + "\n"
+	} else {
+		content = strings.Join(usernames, "\n") + "\n"
+	}
+
+	if err := os.WriteFile(savePath, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+
+	return savePath, nil
+}
+
+func (a *App) ExportAppConfiguration() (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("application context not initialized")
+	}
+
+	snapshot := ConfigExportSnapshot{
+		Version:     "1",
+		ExportedAt:  time.Now().UTC().Format(time.RFC3339),
+		AppSettings: a.GetAppSettings(),
+	}
+	if a.checkerService != nil {
+		snapshot.CheckerSettings = a.checkerService.GetSettings()
+	}
+	if a.webhookService != nil {
+		snapshot.WebhookSettings = a.webhookService.GetSettings()
+	}
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	defaultName := fmt.Sprintf("tellonym-config-%s.json", time.Now().Format("20060102-150405"))
+	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:            "Export Configuration",
+		DefaultFilename:  defaultName,
+		DefaultDirectory: a.layout.ExportsDir,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON Files (*.json)", Pattern: "*.json"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(savePath) == "" {
+		return "", fmt.Errorf("export cancelled")
+	}
+
+	if err := os.WriteFile(savePath, data, 0o644); err != nil {
+		return "", err
+	}
+
+	return savePath, nil
+}
+
+func (a *App) ImportAppConfiguration() (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("application context not initialized")
+	}
+
+	openPath, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title:            "Import Configuration",
+		DefaultDirectory: a.layout.ExportsDir,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON Files (*.json)", Pattern: "*.json"},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(openPath) == "" {
+		return "", fmt.Errorf("import cancelled")
+	}
+
+	data, err := os.ReadFile(openPath)
+	if err != nil {
+		return "", err
+	}
+
+	var snapshot ConfigImportSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return "", fmt.Errorf("invalid config file: %w", err)
+	}
+
+	if snapshot.CheckerSettings != nil && a.checkerService != nil {
+		if err := a.checkerService.UpdateSettings(*snapshot.CheckerSettings); err != nil {
+			return "", err
+		}
+	}
+	if snapshot.WebhookSettings != nil && a.webhookService != nil {
+		if err := a.webhookService.UpdateSettings(*snapshot.WebhookSettings); err != nil {
+			return "", err
+		}
+	}
+	if snapshot.AppSettings != nil {
+		if err := a.UpdateAppSettings(*snapshot.AppSettings); err != nil {
+			return "", err
+		}
+	}
+	if snapshot.AppSettings == nil && snapshot.CheckerSettings == nil && snapshot.WebhookSettings == nil {
+		return "", fmt.Errorf("config file does not contain importable settings")
+	}
+
+	return openPath, nil
 }

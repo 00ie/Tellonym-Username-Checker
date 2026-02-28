@@ -8,15 +8,17 @@ import (
 )
 
 type runtimeLayout struct {
-	RootDir    string
-	ConfigDir  string
-	DataDir    string
-	LogsDir    string
-	ExportsDir string
-	ConfigFile string
-	ProxyFile  string
-	FoundFile  string
-	LogFile    string
+	RootDir         string
+	ConfigDir       string
+	DataDir         string
+	LogsDir         string
+	ExportsDir      string
+	ConfigFile      string
+	AppSettingsFile string
+	WindowStateFile string
+	ProxyFile       string
+	FoundFile       string
+	LogFile         string
 }
 
 func prepareRuntimeLayout() (runtimeLayout, error) {
@@ -27,15 +29,17 @@ func prepareRuntimeLayout() (runtimeLayout, error) {
 
 	rootDir := filepath.Join(workingDir, "tellonym checker")
 	layout := runtimeLayout{
-		RootDir:    rootDir,
-		ConfigDir:  filepath.Join(rootDir, "config"),
-		DataDir:    filepath.Join(rootDir, "data"),
-		LogsDir:    filepath.Join(rootDir, "logs"),
-		ExportsDir: filepath.Join(rootDir, "exports"),
-		ConfigFile: filepath.Join(rootDir, "config", "config.yaml"),
-		ProxyFile:  filepath.Join(rootDir, "proxies.txt"),
-		FoundFile:  filepath.Join(rootDir, "data", "found_usernames.txt"),
-		LogFile:    filepath.Join(rootDir, "logs", "app.log"),
+		RootDir:         rootDir,
+		ConfigDir:       filepath.Join(rootDir, "config"),
+		DataDir:         filepath.Join(rootDir, "data"),
+		LogsDir:         filepath.Join(rootDir, "logs"),
+		ExportsDir:      filepath.Join(rootDir, "exports"),
+		ConfigFile:      filepath.Join(rootDir, "config", "config.yaml"),
+		AppSettingsFile: filepath.Join(rootDir, "config", "app_settings.json"),
+		WindowStateFile: filepath.Join(rootDir, "config", "window_state.json"),
+		ProxyFile:       filepath.Join(rootDir, "proxies.txt"),
+		FoundFile:       filepath.Join(rootDir, "data", "found_usernames.txt"),
+		LogFile:         filepath.Join(rootDir, "logs", "app.log"),
 	}
 
 	dirs := []string{

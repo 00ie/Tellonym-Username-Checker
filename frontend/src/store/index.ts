@@ -1,6 +1,8 @@
 import { create } from 'zustand'
+import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
   CheckAllProxies,
+  ClearDashboardData,
   GetLiveStats,
   GetProxies,
   GetProxyStats,
@@ -53,6 +55,7 @@ interface AppState {
   testProxy: (url: string) => Promise<ProxyTestResult>
   checkAllProxies: () => Promise<ProxyBatchCheckResult>
   updateLiveStats: () => Promise<void>
+  clearDashboardData: () => Promise<void>
 }
 
 const statsPollMs = 1000
@@ -60,6 +63,7 @@ const proxiesPollMs = 5000
 
 let statsPollingInFlight = false
 let proxiesPollingInFlight = false
+let offStatsListener: (() => void) | undefined
 
 const defaultStats: Stats = {
   attempts: 0,
@@ -92,20 +96,54 @@ export const useStore = create<AppState>((set, get) => ({
       return
     }
 
-    void get().updateLiveStats()
     void get().loadProxies()
+    void get().updateLiveStats()
 
-    const statsInterval = window.setInterval(() => {
-      if (statsPollingInFlight) {
-        return
-      }
-      statsPollingInFlight = true
-      void get()
-        .updateLiveStats()
-        .finally(() => {
-          statsPollingInFlight = false
+    let statsInterval: number | undefined
+    try {
+      offStatsListener = EventsOn('stats:update', (stats: LiveStats) => {
+        set((state) => {
+          const timestamp = new Date().toLocaleTimeString()
+          const timestamps = [...state.liveData.timestamps, timestamp].slice(-30)
+          const rates = [...state.liveData.rates, stats.rate].slice(-30)
+
+          return {
+            stats: {
+              attempts: stats.attempts,
+              found: stats.found,
+              errors: stats.errors,
+              rateLimited: stats.rateLimited,
+              rate: stats.rate,
+              avgResponse: stats.avgResponse,
+              uptime: stats.uptime,
+              isRunning: stats.isRunning,
+              isPaused: stats.isPaused,
+            },
+            liveData: {
+              timestamps,
+              rates,
+              recentFinds: stats.recentFinds || [],
+            },
+          }
         })
-    }, statsPollMs)
+      })
+    } catch (error) {
+      console.warn('stats events unavailable, fallback to polling', error)
+    }
+
+    if (!offStatsListener) {
+      statsInterval = window.setInterval(() => {
+        if (statsPollingInFlight) {
+          return
+        }
+        statsPollingInFlight = true
+        void get()
+          .updateLiveStats()
+          .finally(() => {
+            statsPollingInFlight = false
+          })
+      }, statsPollMs)
+    }
 
     const proxiesInterval = window.setInterval(() => {
       if (proxiesPollingInFlight) {
@@ -129,6 +167,10 @@ export const useStore = create<AppState>((set, get) => ({
     }
     if (proxiesInterval) {
       clearInterval(proxiesInterval)
+    }
+    if (offStatsListener) {
+      offStatsListener()
+      offStatsListener = undefined
     }
     statsPollingInFlight = false
     proxiesPollingInFlight = false
@@ -222,5 +264,17 @@ export const useStore = create<AppState>((set, get) => ({
     const result = await CheckAllProxies()
     await get().loadProxies()
     return result
+  },
+
+  clearDashboardData: async () => {
+    await ClearDashboardData()
+    set({
+      stats: defaultStats,
+      liveData: {
+        timestamps: [],
+        rates: [],
+        recentFinds: [],
+      },
+    })
   },
 }))

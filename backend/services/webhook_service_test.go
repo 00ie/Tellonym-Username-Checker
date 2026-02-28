@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"tellonym-checker/backend/core/config"
+	"tellonym-checker/backend/utils/logger"
 )
 
 func TestParseRetryAfter(t *testing.T) {
@@ -115,5 +118,103 @@ func TestSendWebhookRequestRateLimited(t *testing.T) {
 	}
 	if retryAfter != 2*time.Second {
 		t.Fatalf("expected retryAfter=2s, got %s", retryAfter)
+	}
+}
+
+func TestWebhookServiceUpdateSettingsRoundTripMultipleWebhooks(t *testing.T) {
+	service := NewWebhookService(&config.WebhookConfig{}, logger.NewLogger(logger.Config{Level: "error"}))
+	defer service.Stop()
+
+	err := service.UpdateSettings(WebhookSettings{
+		ActiveWebhook: 1,
+		Webhooks: []WebhookConfig{
+			{
+				Label:     "Webhook 1",
+				Enabled:   true,
+				URL:       "https://discord.com/api/webhooks/111/aaa",
+				TimeoutMs: 8000,
+			},
+			{
+				Label:     "Webhook 2",
+				Enabled:   true,
+				URL:       "canary.discord.com/api/webhooks/222/bbb",
+				TimeoutMs: 9000,
+			},
+			{
+				Label:     "Webhook 3",
+				Enabled:   false,
+				URL:       "https://ptb.discord.com/api/webhooks/333/ccc",
+				TimeoutMs: 10000,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("update settings failed: %v", err)
+	}
+
+	settings := service.GetSettings()
+	if len(settings.Webhooks) != 3 {
+		t.Fatalf("expected 3 webhooks, got %d", len(settings.Webhooks))
+	}
+	if settings.ActiveWebhook != 1 {
+		t.Fatalf("expected active webhook 1, got %d", settings.ActiveWebhook)
+	}
+	if settings.Webhooks[1].Label != "Webhook 2" {
+		t.Fatalf("expected relabeled webhook 2, got %q", settings.Webhooks[1].Label)
+	}
+	if settings.Webhooks[1].URL != "https://canary.discord.com/api/webhooks/222/bbb" {
+		t.Fatalf("unexpected normalized canary URL: %q", settings.Webhooks[1].URL)
+	}
+	if settings.URL != settings.Webhooks[1].URL {
+		t.Fatalf("expected top-level URL to match active webhook")
+	}
+}
+
+func TestNormalizeWebhookURLAcceptsDiscordVariants(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "normal discord",
+			input: "https://discord.com/api/webhooks/123/token",
+			want:  "https://discord.com/api/webhooks/123/token",
+		},
+		{
+			name:  "canary discord without scheme",
+			input: "canary.discord.com/api/webhooks/123/token",
+			want:  "https://canary.discord.com/api/webhooks/123/token",
+		},
+		{
+			name:  "ptb discord",
+			input: "https://ptb.discord.com/api/webhooks/123/token",
+			want:  "https://ptb.discord.com/api/webhooks/123/token",
+		},
+		{
+			name:  "custom https endpoint",
+			input: "https://webhook.site/abc",
+			want:  "https://webhook.site/abc",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeWebhookURL(tc.input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestNormalizeWebhookURLRejectsUnsupportedScheme(t *testing.T) {
+	_, err := normalizeWebhookURL("ftp://discord.com/api/webhooks/123/token")
+	if err == nil {
+		t.Fatalf("expected error for unsupported scheme")
 	}
 }

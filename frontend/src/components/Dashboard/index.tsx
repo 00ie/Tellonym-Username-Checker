@@ -23,6 +23,7 @@ import {
   SparklesIcon,
   StopCircleIcon,
 } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import { useStore } from '../../store'
 import { useI18n } from '../../i18n'
 import { formatDuration, formatNumber } from '../../utils/format'
@@ -46,7 +47,7 @@ const cardSurface: Record<string, string> = {
 }
 
 export const Dashboard: React.FC = () => {
-  const { stats, liveData, startChecker, stopChecker } = useStore()
+  const { stats, liveData, startChecker, stopChecker, clearDashboardData } = useStore()
   const { t } = useI18n()
   const { theme } = useTheme()
   const [loading, setLoading] = useState(false)
@@ -60,6 +61,18 @@ export const Dashboard: React.FC = () => {
       } else {
         await startChecker(0, 50)
       }
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleClearData = async () => {
+    setLoading(true)
+    try {
+      await clearDashboardData()
+      toast.success(t('dashboard.toast.clearSuccess'))
+    } catch {
+      toast.error(t('dashboard.toast.clearFailed'))
     } finally {
       setLoading(false)
     }
@@ -81,7 +94,7 @@ export const Dashboard: React.FC = () => {
         },
       ],
     }),
-    [liveData.rates, liveData.timestamps, t],
+    [liveData.rates, liveData.timestamps, palette.border, palette.fill, t],
   )
 
   const availabilityPct = stats.attempts > 0 ? (stats.found / stats.attempts) * 100 : 0
@@ -172,6 +185,13 @@ export const Dashboard: React.FC = () => {
               >
                 {stats.isRunning ? <StopCircleIcon className="h-5 w-5" /> : <PlayCircleIcon className="h-5 w-5" />}
                 {stats.isRunning ? t('dashboard.stop') : t('dashboard.start')}
+              </button>
+              <button
+                onClick={handleClearData}
+                disabled={loading || stats.isRunning}
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-700/90 bg-black/55 px-5 py-3 font-medium text-zinc-200 transition hover:border-red-500/70 hover:text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {t('dashboard.clearData')}
               </button>
               <div className="rounded-xl border border-zinc-700/70 bg-black/40 px-4 py-3">
                 <p className="text-xs uppercase tracking-[0.2em] text-zinc-400">{t('dashboard.instantRate')}</p>

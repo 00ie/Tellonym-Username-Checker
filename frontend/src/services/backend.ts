@@ -1,5 +1,6 @@
 import type {
   AppConfig,
+  AppSettings,
   ProxyBatchCheckResult,
   ProxyCleanupResult,
   CheckerSettings,
@@ -48,6 +49,10 @@ const defaultConfig: AppConfig = {
   environment: 'development',
 }
 
+const defaultAppSettings: AppSettings = {
+  openLinksOnClose: true,
+}
+
 const defaultCheckerSettings: CheckerSettings = {
   requestTimeoutMs: 10000,
   maxRetries: 3,
@@ -69,6 +74,15 @@ const defaultWebhookSettings: WebhookSettings = {
   username: 'Gon',
   avatarURL: 'https://i.pinimg.com/736x/dd/f4/75/ddf475e4b9767235362fc1cf3a16ed1c.jpg',
   timeoutMs: 10000,
+  activeWebhook: 0,
+  webhooks: [
+    {
+      label: 'Webhook 1',
+      enabled: false,
+      url: '',
+      timeoutMs: 10000,
+    },
+  ],
 }
 
 function getBoundApp(): any {
@@ -162,4 +176,32 @@ export function SendTestWebhook(username: string): Promise<void> {
 
 export function GetConfig(): Promise<AppConfig> {
   return invoke<AppConfig>('GetConfig', [], defaultConfig)
+}
+
+export function ClearDashboardData(): Promise<void> {
+  return invoke<void>('ClearDashboardData', [], undefined as void)
+}
+
+export function GetAppSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>('GetAppSettings', [], defaultAppSettings)
+}
+
+export function UpdateAppSettings(settings: AppSettings): Promise<void> {
+  return invoke<void>('UpdateAppSettings', [settings], undefined as void)
+}
+
+export function Ping(): Promise<boolean> {
+  return invoke<boolean>('Ping', [], false)
+}
+
+export function ExportFoundUsernames(): Promise<string> {
+  return invoke<string>('ExportFoundUsernames', [], '')
+}
+
+export function ExportAppConfiguration(): Promise<string> {
+  return invoke<string>('ExportAppConfiguration', [], '')
+}
+
+export function ImportAppConfiguration(): Promise<string> {
+  return invoke<string>('ImportAppConfiguration', [], '')
 }

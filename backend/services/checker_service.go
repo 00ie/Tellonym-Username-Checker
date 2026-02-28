@@ -162,3 +162,11 @@ func (s *CheckerService) GetSettings() CheckerSettings {
 		MaxConsecutiveDots:  rules.MaxConsecutiveDots,
 	}
 }
+
+func (s *CheckerService) ResetStats() error {
+	if s.checker == nil {
+		return fmt.Errorf("checker is not initialized")
+	}
+
+	return s.checker.ResetStats()
+}

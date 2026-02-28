@@ -4,9 +4,10 @@ import { useI18n } from '../../i18n'
 interface NavbarProps {
   activeTab: string
   onTabChange: (tab: string) => void
+  backendConnected: boolean
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange }) => {
+export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange, backendConnected }) => {
   const { t } = useI18n()
   const tabs = [
     { id: 'dashboard', label: t('nav.dashboard') },
@@ -20,7 +21,19 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, onTabChange }) => {
   return (
     <header className="sticky top-0 z-30 border-b border-red-500/40 bg-black/90 shadow-[0_0_22px_rgba(239,68,68,0.2)] backdrop-blur-md">
       <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
-        <h1 className="text-xl font-semibold tracking-wide text-red-200">{t('app.name')}</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-semibold tracking-wide text-red-200">{t('app.name')}</h1>
+          <span
+            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${
+              backendConnected
+                ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-300'
+                : 'border-red-500/50 bg-red-500/10 text-red-300'
+            }`}
+          >
+            <span className={`h-2 w-2 rounded-full ${backendConnected ? 'bg-emerald-400' : 'bg-red-400'}`} />
+            {backendConnected ? t('nav.backendOnline') : t('nav.backendOffline')}
+          </span>
+        </div>
         <nav className="flex flex-wrap gap-2">
           {tabs.map((tab) => {
             const active = activeTab === tab.id

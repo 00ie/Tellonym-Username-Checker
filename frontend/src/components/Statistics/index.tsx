@@ -144,7 +144,11 @@ function aggregatePoints(rows: HistoricalStats[], bucketMs: number): NormalizedP
   return points
 }
 
-export const Statistics: React.FC = () => {
+interface StatisticsProps {
+  active?: boolean
+}
+
+export const Statistics: React.FC<StatisticsProps> = ({ active = true }) => {
   const { stats } = useStore()
   const { t } = useI18n()
   const { theme } = useTheme()
@@ -163,6 +167,9 @@ export const Statistics: React.FC = () => {
   const bucketMs = useMemo(() => resolveBucketMs(granularity, rangeMs), [granularity, rangeMs])
 
   const refreshHistory = useCallback(async () => {
+    if (!active) {
+      return
+    }
     setLoading(true)
     try {
       const rows = await GetHistoricalStats(activeRange.from.toISOString(), activeRange.to.toISOString())
@@ -170,13 +177,19 @@ export const Statistics: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [activeRange.from, activeRange.to])
+  }, [active, activeRange.from, activeRange.to])
 
   useEffect(() => {
+    if (!active) {
+      return
+    }
     void refreshHistory()
-  }, [refreshHistory])
+  }, [active, refreshHistory])
 
   useEffect(() => {
+    if (!active) {
+      return
+    }
     const interval = window.setInterval(() => {
       void refreshHistory()
     }, 10000)
@@ -184,7 +197,7 @@ export const Statistics: React.FC = () => {
     return () => {
       clearInterval(interval)
     }
-  }, [refreshHistory])
+  }, [active, refreshHistory])
 
   const aggregated = useMemo(() => aggregatePoints(historicalRows, bucketMs), [bucketMs, historicalRows])
 
@@ -211,7 +224,7 @@ export const Statistics: React.FC = () => {
         },
       ],
     }),
-    [aggregated, bucketMs, t],
+    [aggregated, bucketMs, palette.border, palette.fill, t],
   )
 
   const chartOptions: ChartOptions<'line'> = {
