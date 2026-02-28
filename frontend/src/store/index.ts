@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
   CheckAllProxies,
   ClearDashboardData,
@@ -65,6 +64,16 @@ let statsPollingInFlight = false
 let proxiesPollingInFlight = false
 let offStatsListener: (() => void) | undefined
 
+type WailsEventsOn = (eventName: string, callback: (payload: LiveStats) => void) => (() => void) | void
+
+function getEventsOn(): WailsEventsOn | null {
+  const runtime = (window as Window & { runtime?: { EventsOn?: WailsEventsOn } }).runtime
+  if (!runtime || typeof runtime.EventsOn !== 'function') {
+    return null
+  }
+  return runtime.EventsOn
+}
+
 const defaultStats: Stats = {
   attempts: 0,
   found: 0,
@@ -100,35 +109,39 @@ export const useStore = create<AppState>((set, get) => ({
     void get().updateLiveStats()
 
     let statsInterval: number | undefined
-    try {
-      offStatsListener = EventsOn('stats:update', (stats: LiveStats) => {
-        set((state) => {
-          const timestamp = new Date().toLocaleTimeString()
-          const timestamps = [...state.liveData.timestamps, timestamp].slice(-30)
-          const rates = [...state.liveData.rates, stats.rate].slice(-30)
+    const eventsOn = getEventsOn()
+    if (eventsOn) {
+      try {
+        const unsub = eventsOn('stats:update', (stats: LiveStats) => {
+          set((state) => {
+            const timestamp = new Date().toLocaleTimeString()
+            const timestamps = [...state.liveData.timestamps, timestamp].slice(-30)
+            const rates = [...state.liveData.rates, stats.rate].slice(-30)
 
-          return {
-            stats: {
-              attempts: stats.attempts,
-              found: stats.found,
-              errors: stats.errors,
-              rateLimited: stats.rateLimited,
-              rate: stats.rate,
-              avgResponse: stats.avgResponse,
-              uptime: stats.uptime,
-              isRunning: stats.isRunning,
-              isPaused: stats.isPaused,
-            },
-            liveData: {
-              timestamps,
-              rates,
-              recentFinds: stats.recentFinds || [],
-            },
-          }
+            return {
+              stats: {
+                attempts: stats.attempts,
+                found: stats.found,
+                errors: stats.errors,
+                rateLimited: stats.rateLimited,
+                rate: stats.rate,
+                avgResponse: stats.avgResponse,
+                uptime: stats.uptime,
+                isRunning: stats.isRunning,
+                isPaused: stats.isPaused,
+              },
+              liveData: {
+                timestamps,
+                rates,
+                recentFinds: stats.recentFinds || [],
+              },
+            }
+          })
         })
-      })
-    } catch (error) {
-      console.warn('stats events unavailable, fallback to polling', error)
+        offStatsListener = typeof unsub === 'function' ? unsub : undefined
+      } catch (error) {
+        console.warn('stats events unavailable, fallback to polling', error)
+      }
     }
 
     if (!offStatsListener) {
